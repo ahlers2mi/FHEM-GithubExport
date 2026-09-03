@@ -19,6 +19,34 @@
 #
 ##############################################################################
 #
+# 1.0.3 - 2026-09-03  Der erste echte Export scheiterte an einem 400 von
+#                     GitHub: "We received a malformed request from your
+#                     client", ausgerechnet beim POST auf /git/blobs, waehrend
+#                     jeder GET durchlief.
+#                     Ursache ist nicht die Blob-Schnittstelle, sondern die
+#                     Leitung dorthin. HttpUtils schreibt im blockierenden
+#                     Zweig den Rumpf mit EINEM syswrite, ohne Schleife und
+#                     ohne den Rueckgabewert anzusehen. IO::Socket::SSL liefert
+#                     aber auch auf einem blockierenden Socket nur ein
+#                     TLS-Record - 16384 Bytes - je Aufruf. Nachgestellt mit
+#                     einem lokalen TLS-Server und der Groesse unserer
+#                     fhem.cfg: gewollt 1823437, geschrieben 16384, empfangen
+#                     16384. GitHub wartete auf den Rest und gab nach 25
+#                     Sekunden auf. Die GETs liefen, weil sie keinen Rumpf
+#                     haben - deshalb sah es nach einem Problem der
+#                     Blob-Schnittstelle aus.
+#                     Das Modul spricht jetzt selbst mit dem Server
+#                     (GithubExport_Request): HTTP/1.0 ueber IO::Socket::SSL,
+#                     Schreibschleife bis alles draussen ist, Antwort bis zum
+#                     Dateiende, "chunked" wird notfalls ausgewertet. 6,4 MB
+#                     gehen damit in 390 Runden raus.
+#                     Ein Test schickt 1,8 MB durch einen echten TLS-Server und
+#                     zaehlt nach, was ankommt; mit einem einzelnen syswrite
+#                     statt der Schleife wird er rot.
+#                     Nebenwirkung: attr proxy von FHEM wirkt hier nicht mehr,
+#                     und httpTimeout deckelt jetzt den Verbindungsaufbau. Die
+#                     Gesamtdauer begrenzt weiter attr timeout.
+#
 # 1.0.2 - 2026-09-03  Online-Hilfe fuer Set-, Get- und Attributnamen.
 #                     FHEMWEB blendet unter dem Klappmenue die passende
 #                     Erklaerung ein, sobald man etwas auswaehlt - es holt sich
@@ -84,6 +112,7 @@ use MIME::Base64 qw(encode_base64 decode_base64);
 use Digest::SHA qw(sha1_hex);
 use File::Basename qw(basename dirname);
 use Sys::Hostname qw(hostname);
+use Errno qw(EINTR EAGAIN EWOULDBLOCK);
 
 use vars qw($readingFnAttributes $init_done %defs %attr);
 
@@ -97,7 +126,7 @@ my $GE_ERRPAT = '(error|fehler|warn|timeout|disconnect|reappear|reset|cannot|'
 
 # ---------------------------------------------------------------- Version
 {
-    my $FALLBACK = "1.0.2";
+    my $FALLBACK = "1.0.3";
     my $cached;
     sub GithubExport_Version {
         return $cached if(defined($cached));
@@ -805,42 +834,155 @@ sub GithubExport_Scrub {
     return $text;
 }
 
+# ---------------------------------------------------------------- HTTP
+# Eigener Client statt HttpUtils_BlockingGet - und zwar aus einem gemessenen
+# Grund, nicht aus Geschmack.
+#
+# HttpUtils schreibt im blockierenden Zweig den Rumpf mit EINEM syswrite, ohne
+# Schleife und ohne den Rueckgabewert anzusehen:
+#
+#     syswrite $hash->{conn}, $hdr;
+#     syswrite $hash->{conn}, $data if(defined($data));
+#
+# IO::Socket::SSL liefert aber auch auf einem BLOCKIERENDEN Socket nur ein
+# TLS-Record - 16384 Bytes - je Aufruf zurueck. Nachgestellt mit einem lokalen
+# TLS-Server und einem Rumpf in der Groesse unserer fhem.cfg:
+#
+#     gewollt 1823437, syswrite lieferte 16384, empfangen 16384
+#
+# GitHub bekam also 16 kB von 1,8 MB angekuendigten, wartete auf den Rest und
+# antwortete nach 25 Sekunden mit 400 "We received a malformed request from
+# your client". Die GET-Aufrufe liefen die ganze Zeit, weil sie keinen Rumpf
+# haben - deshalb sah es nach einem Problem der Blob-Schnittstelle aus.
+#
+# Hier wird darum geschrieben, bis alles draussen ist. Die Vier-Argument-Form
+# von syswrite nimmt einen Versatz und spart das Umkopieren; mit substr waere
+# das bei 6 MB in 16-kB-Schritten quadratisch.
+sub GithubExport_Request {
+    my ($cfg, $method, $pfad, $kopf, $data) = @_;
+    no warnings "once";        # $IO::Socket::SSL::SSL_ERROR steht in fremdem Paket
+
+    my ($schema, $host, $port, $prefix) = GithubExport_UrlTeile($cfg->{apiUrl});
+
+    my $sock;
+    if($schema eq "https") {
+        eval { require IO::Socket::SSL; 1 }
+            or die "IO::Socket::SSL fehlt - ohne das gibt es kein HTTPS\n";
+        $sock = IO::Socket::SSL->new(PeerHost => $host, PeerPort => $port,
+                                     Timeout  => $cfg->{httpTimeout});
+        die "Keine Verbindung zu $host:$port: "
+          . ($IO::Socket::SSL::SSL_ERROR || $! || "unbekannt") . "\n" if(!$sock);
+    } else {
+        eval { require IO::Socket::INET; 1 } or die "IO::Socket::INET fehlt\n";
+        $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port,
+                                      Proto => "tcp", Timeout => $cfg->{httpTimeout});
+        die "Keine Verbindung zu $host:$port: $!\n" if(!$sock);
+    }
+    $sock->blocking(1);
+
+    # HTTP/1.0: dann antwortet der Server ohne "chunked" und schliesst am Ende
+    # selbst - der Rumpf ist damit schlicht alles bis zum Dateiende.
+    my $out = "$method $prefix$pfad HTTP/1.0\r\n"
+            . join("", map { "$_\r\n" } @$kopf) . "\r\n";
+    $out .= $data if(defined($data));
+
+    my ($ab, $len) = (0, length($out));
+    while($ab < $len) {
+        my $n = syswrite($sock, $out, $len - $ab, $ab);
+        if(!defined($n)) {
+            next if($! == EINTR);
+            if($! == EAGAIN || $! == EWOULDBLOCK) {
+                select(undef, undef, undef, 0.02);
+                next;
+            }
+            die "Schreibfehler nach $ab von $len Bytes: $!\n";
+        }
+        die "Gegenstelle nimmt nach $ab von $len Bytes nichts mehr an\n" if($n <= 0);
+        $ab += $n;
+    }
+
+    my $ant = "";
+    while(1) {
+        my $n = sysread($sock, my $puffer, 65536);
+        last if(!defined($n) || $n <= 0);
+        $ant .= $puffer;
+    }
+    close($sock);
+
+    die "Keine Antwort von $host\n" if($ant eq "");
+    my ($kopfteil, $rumpf) = split(/\r\n\r\n/, $ant, 2);
+    $rumpf = "" if(!defined($rumpf));
+    my ($code) = $kopfteil =~ m{^HTTP/\S+\s+(\d+)};
+    die "Antwort ohne Statuszeile von $host\n" if(!$code);
+    $rumpf = GithubExport_Entchunken($rumpf)
+        if($kopfteil =~ /^Transfer-Encoding:\s*chunked/mi);
+
+    return ($code, $rumpf);
+}
+
+# HTTP/1.0 sollte kein "chunked" ausloesen; falls doch, kostet die Auswertung
+# zwoelf Zeilen und erspart einen Fehler, den man nur schwer erkennt.
+sub GithubExport_Entchunken {
+    my ($roh) = @_;
+    my $raus = "";
+    while($roh =~ s/^([0-9a-fA-F]+)[^\r\n]*\r\n//) {
+        my $n = hex($1);
+        last if($n == 0);
+        $raus .= substr($roh, 0, $n);
+        $roh   = substr($roh, $n);
+        $roh =~ s/^\r\n//;
+    }
+    return $raus;
+}
+
+sub GithubExport_UrlTeile {
+    my ($url) = @_;
+    my ($schema, $rest) = $url =~ m{^(https?)://(.+)$};
+    die "apiUrl '$url' ist keine http(s)-Adresse\n" if(!$schema);
+    my ($hostport, $prefix) = $rest =~ m{^([^/]+)(.*)$};
+    my ($host, $port) = split(/:/, $hostport, 2);
+    $port = ($schema eq "https" ? 443 : 80) if(!$port);
+    $prefix = "" if(!defined($prefix));
+    $prefix =~ s{/+$}{};
+    return ($schema, $host, $port + 0, $prefix);
+}
+
 # ---------------------------------------------------------------- GitHub-API
 sub GithubExport_Api {
-    my ($cfg, $method, $path, $body) = @_;
+    my ($cfg, $method, $pfad, $body) = @_;
 
-    my %param = (
-        url      => $cfg->{apiUrl} . $path,
-        timeout  => $cfg->{httpTimeout},
-        method   => $method,
-        loglevel => 5,
-        hideurl  => 1,
-        header   => "Authorization: Bearer $cfg->{token}\r\n"
-                  . "Accept: application/vnd.github+json\r\n"
-                  . "X-GitHub-Api-Version: 2022-11-28\r\n"
-                  . "Content-Type: application/json\r\n"
-                  . "User-Agent: FHEM-GithubExport",
+    my $data = defined($body) ? GithubExport_JsonEnc($body) : undef;
+    my (undef, $host, $port) = GithubExport_UrlTeile($cfg->{apiUrl});
+
+    my @kopf = (
+        "Host: $host" . (($port == 443 || $port == 80) ? "" : ":$port"),
+        "Authorization: Bearer $cfg->{token}",
+        "Accept: application/vnd.github+json",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "User-Agent: FHEM-GithubExport",
     );
-    $param{data} = GithubExport_JsonEnc($body) if(defined($body));
+    push @kopf, "Content-Type: application/json",
+                "Content-Length: " . length($data) if(defined($data));
 
-    my ($err, $data) = HttpUtils_BlockingGet(\%param);
-    my $code = $param{code} || 0;
-
-    die GithubExport_Scrub($cfg, "$method $path: $err") . "\n"
-        if(defined($err) && $err ne "");
+    my ($code, $antwort) = GithubExport_Request($cfg, $method, $pfad, \@kopf, $data);
 
     if($code < 200 || $code > 299) {
         my $msg = "";
-        my $j = eval { GithubExport_JsonDec($data) };
+        my $j = eval { GithubExport_JsonDec($antwort) };
         $msg = " - $j->{message}" if(ref($j) eq "HASH" && $j->{message});
         $msg .= " (Token fehlt das Recht 'contents: write' oder ist abgelaufen)"
             if($code == 401 || $code == 403);
         $msg .= " (Repository, Branch oder Pfad gibt es nicht)" if($code == 404);
-        die "GitHub antwortet $code auf $method $path$msg\n";
+        # Bei einem grossen Rumpf gehoert seine Groesse in die Meldung: genau
+        # daran hing der Fehler oben, und ohne die Zahl sucht man woanders.
+        $msg .= sprintf(" [Rumpf %.1f kB]", length($data)/1024)
+            if(defined($data) && length($data) > 100000);
+        die GithubExport_Scrub($cfg,
+                "GitHub antwortet $code auf $method $pfad$msg") . "\n";
     }
 
-    return {} if(!defined($data) || $data !~ /\S/);
-    return GithubExport_JsonDec($data);
+    return {} if($antwort !~ /\S/);
+    return GithubExport_JsonDec($antwort);
 }
 
 # ---------------------------------------------------------------- Push
@@ -1229,9 +1371,21 @@ sub GithubExport_Aborted {
         <code>%b</code> Branch.</li>
     <li><a id="GithubExport-attr-authorEmail"></a><a id="GithubExport-attr-authorName"></a><b>authorName</b>, <b>authorEmail</b> &ndash; Autor des Commits. Ohne
         Angabe nimmt GitHub den Besitzer des Tokens.</li>
-    <li><a id="GithubExport-attr-apiUrl"></a><b>apiUrl</b> &ndash; Default <code>https://api.github.com</code>
-        (fuer GitHub Enterprise anpassen).</li>
-    <li><a id="GithubExport-attr-httpTimeout"></a><b>httpTimeout</b> (60) &ndash; Sekunden je API-Aufruf.</li>
+    <li><a id="GithubExport-attr-apiUrl"></a><b>apiUrl</b> &ndash; Default
+        <code>https://api.github.com</code> (fuer GitHub Enterprise anpassen).
+        <br>
+        Das Modul spricht ueber einen <b>eigenen</b> HTTP-Client mit dem
+        Server, nicht ueber <code>HttpUtils</code>: dessen blockierender Zweig
+        schreibt den Rumpf mit einem einzigen <code>syswrite</code>, und
+        <code>IO::Socket::SSL</code> liefert auch auf einem blockierenden
+        Socket nur ein TLS-Record (16 kB) je Aufruf zurueck &ndash; von einer
+        1,8 MB grossen <code>fhem.cfg</code> kamen so 16 kB an, und GitHub
+        antwortete mit <code>400 malformed request</code>. Zwei Folgen davon:
+        <code>attr global proxy</code> wirkt hier <b>nicht</b>, und das
+        Zertifikat der Gegenstelle wird immer geprueft.</li>
+    <li><a id="GithubExport-attr-httpTimeout"></a><b>httpTimeout</b> (60) &ndash; Sekunden
+        fuer den <i>Verbindungsaufbau</i>. Die Gesamtdauer eines Laufs deckelt
+        <code>timeout</code>.</li>
     <li><a id="GithubExport-attr-timeout"></a><b>timeout</b> (300) &ndash; Sekunden, nach denen der ganze Lauf
         abgebrochen wird.</li>
     <li><a id="GithubExport-attr-disable"></a><b>disable</b> &ndash; 1 schaltet Export und Zeitplan ab.</li>

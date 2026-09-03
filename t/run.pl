@@ -20,6 +20,16 @@ use lib $FindBin::Bin;
 require "$FindBin::Bin/FhemStub.pm";
 require "$FindBin::Bin/../FHEM/98_GithubExport.pm";
 
+# Das Nach-GitHub haengt UNTER der Kopfzeilen-Erzeugung: GithubExport_Api mit
+# seinen Kopfzeilen, seiner JSON-Kodierung und seiner Fehlerauswertung laeuft
+# also mit und wird geprueft. Nur die Leitung selbst ist ausgetauscht - die
+# bekommt weiter unten ihren eigenen Test gegen einen echten TLS-Server.
+my $ECHT_REQUEST = \&GithubExport_Request;   # fuer den TLS-Test weiter unten
+{
+    no warnings qw(redefine once);
+    *GithubExport_Request = \&main::gh_request;
+}
+
 our %defs;
 our %attr;
 our @LOG;
@@ -463,6 +473,112 @@ sub konfig {
     like("set <quatsch>: gleiche Form",
          GithubExport_Set($hash, "gh", "quatsch"),
          qr/^Unknown argument quatsch, choose one of \S/);
+}
+
+# ================================================================== Die Leitung
+# Der Fehler, der das Modul im Betrieb zu Fall brachte: ein POST mit 1,8 MB
+# Rumpf kam zu 16 kB an, GitHub antwortete mit 400 "malformed request".
+# IO::Socket::SSL liefert auch auf einem BLOCKIERENDEN Socket nur ein
+# TLS-Record je syswrite - wer den Rueckgabewert nicht ansieht, verliert den
+# Rest stillschweigend.
+#
+# Nachstellen laesst sich das nur ueber TLS: auf einer blanken TCP-Verbindung
+# blockiert ein Schreibvorgang, bis alles draussen ist, und liefert nie einen
+# Teilerfolg. Der Test braucht deshalb einen echten TLS-Server.
+{
+    my $geht = eval { require IO::Socket::SSL; 1 };
+    my $openssl = (system("openssl version >/dev/null 2>&1") == 0);
+
+    if(!$geht || !$openssl) {
+        print "HINW Leitungstest uebersprungen (IO::Socket::SSL oder openssl fehlt)\n";
+    } else {
+        my $dir = tempdir(CLEANUP => 1);
+        system("openssl req -x509 -newkey rsa:2048 -keyout $dir/k.pem -out $dir/c.pem "
+             . "-days 1 -nodes -subj /CN=localhost >/dev/null 2>&1");
+
+        my $pid = fork();
+        die "fork: $!" if(!defined($pid));
+
+        if(!$pid) {                                   # ---- Server
+            my $srv = IO::Socket::SSL->new(LocalAddr => "127.0.0.1", LocalPort => 0,
+                        Listen => 5, ReuseAddr => 1,
+                        SSL_cert_file => "$dir/c.pem", SSL_key_file => "$dir/k.pem");
+            exit(1) if(!$srv);
+            open(my $fh, ">", "$dir/port") or exit(1);
+            print $fh $srv->sockport(); close($fh);
+
+            my $c = $srv->accept();
+            exit(1) if(!$c);
+            my $kopf = "";
+            while($kopf !~ /\r\n\r\n/) {
+                my $n = sysread($c, my $b, 1);
+                last if(!$n);
+                $kopf .= $b;
+            }
+            my ($cl) = $kopf =~ /Content-Length:\s*(\d+)/i;
+            $cl ||= 0;
+            my $da = 0;
+            # Frist beim Lesen. Ohne sie wartet der Server bei einem
+            # abgeschnittenen Rumpf ewig auf den Rest - der Test wuerde dann
+            # haengen statt rot zu werden. (Genau so verhaelt sich GitHub, nur
+            # gibt es nach 25 Sekunden auf.)
+            my $schluss = time() + 5;
+            while($da < $cl && time() < $schluss) {
+                my $rin = "";
+                vec($rin, fileno($c), 1) = 1;
+                # Bei TLS koennen entschluesselte Bytes schon im Puffer liegen,
+                # die select nicht sieht - deshalb pending() zuerst fragen.
+                if(!$c->pending()) {
+                    next if(select(my $rout = $rin, undef, undef, 0.5) <= 0);
+                }
+                my $n = sysread($c, my $b, 65536);
+                last if(!defined($n) || $n <= 0);
+                $da += $n;
+            }
+            open($fh, ">", "$dir/ergebnis") or exit(1);
+            print $fh "$cl $da"; close($fh);
+
+            my $rumpf = main::gh_json({ sha => "0" x 40 });
+            print $c "HTTP/1.1 200 OK\r\nContent-Length: " . length($rumpf)
+                   . "\r\nConnection: close\r\n\r\n$rumpf";
+            close($c);
+            exit(0);
+        }
+
+        # ---- Client: selbst signiertes Zertifikat, also Pruefung aus. Das
+        # gilt nur fuer diesen Testlauf, das Modul selbst prueft weiterhin.
+        IO::Socket::SSL::set_defaults(SSL_verify_mode => 0)
+            if(IO::Socket::SSL->can("set_defaults"));
+
+        my $port;
+        for (1..100) {
+            if(-s "$dir/port") { $port = datei("$dir/port"); last; }
+            select(undef, undef, undef, 0.1);
+        }
+
+        if(!$port) {
+            ok("Leitungstest: Server gestartet", 0, "kein Port");
+        } else {
+            my $rumpf = "z" x 1_823_437;              # so gross wie die echte fhem.cfg
+            my @kopf = ("Host: 127.0.0.1:$port", "Content-Type: application/json",
+                        "Content-Length: " . length($rumpf));
+            my ($code, $antwort) = eval {
+                $ECHT_REQUEST->({ apiUrl => "https://127.0.0.1:$port", httpTimeout => 10 },
+                                "POST", "/git/blobs", \@kopf, $rumpf) };
+            my $fehler = $@;
+
+            is("Leitung: Status 200", $code, "200");
+            ok("Leitung: kein Fehler", !$fehler, $fehler);
+            like("Leitung: Antwort ausgewertet", $antwort, qr/"sha"/);
+
+            waitpid($pid, 0);
+            my ($soll, $ist) = split(/ /, (datei("$dir/ergebnis") || "0 0"));
+            is("Leitung: 1,8 MB kommen VOLLSTAENDIG an", "$ist von $soll",
+               length($rumpf) . " von " . length($rumpf));
+        }
+        kill("TERM", $pid);
+        waitpid($pid, 0);
+    }
 }
 
 # ------------------------------------------------------------------ Ergebnis

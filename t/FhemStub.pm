@@ -1,10 +1,12 @@
 # FHEM-Attrappe fuer die Tests unter t/ - genug, damit 98_GithubExport.pm
 # laeuft, ohne eine FHEM-Installation zu brauchen.
 #
-# HttpUtils_BlockingGet ist hier ein kleines Nach-GitHub: es beantwortet die
-# Aufrufe der Git-Data-API aus einem Zustand im Speicher und schreibt jeden
-# Aufruf mit. Damit laesst sich pruefen, WAS das Modul hochlaedt - und vor
-# allem, was es NICHT hochlaedt.
+# gh_request ist hier ein kleines Nach-GitHub: es beantwortet die Aufrufe der
+# Git-Data-API aus einem Zustand im Speicher und schreibt jeden Aufruf mit.
+# Damit laesst sich pruefen, WAS das Modul hochlaedt - und vor allem, was es
+# NICHT hochlaedt. Eingehaengt wird es in run.pl anstelle von
+# GithubExport_Request, also unterhalb der Kopfzeilen-Erzeugung: die wird damit
+# mitgeprueft.
 package main;
 
 use strict;
@@ -52,17 +54,12 @@ sub gh_call {
     return scalar(grep { $_->[0] eq $method && $_->[1] =~ $re } @HTTP);
 }
 
-sub HttpUtils_BlockingGet {
-    my ($p) = @_;
-    my $m = $p->{method} || "GET";
-    push @HTTP, [$m, $p->{url}, $p->{data}, $p->{header}];
+sub gh_request {
+    my ($cfg, $m, $u, $kopf, $data) = @_;
+    push @HTTP, [$m, $u, $data, join("\r\n", @$kopf)];
 
-    if($GH{fail}) {
-        $p->{code} = $GH{fail}[0];
-        return (undef, main::gh_json({ message => $GH{fail}[1] }));
-    }
+    return ($GH{fail}[0], main::gh_json({ message => $GH{fail}[1] })) if($GH{fail});
 
-    my $u = $p->{url};
     my $r;
     if   ($u =~ m{/repos/[^/]+/[^/]+$})            { $r = { private => $GH{private}, default_branch => "main" }; }
     elsif($u =~ m{/git/ref/heads/})                { $r = { object => { sha => $GH{head} } }; }
@@ -74,17 +71,16 @@ sub HttpUtils_BlockingGet {
         $r->{tree} = [] if($GH{truncated});
     }
     elsif($m eq "POST" && $u =~ m{/git/blobs$})    {
-        my $j = main::gh_unjson($p->{data});
+        my $j = main::gh_unjson($data);
         require MIME::Base64;
         $r = { sha => gh_blob_sha(MIME::Base64::decode_base64($j->{content})) };
     }
     elsif($m eq "POST" && $u =~ m{/git/trees$})    { $r = { sha => $GH{newTree} }; }
     elsif($m eq "POST" && $u =~ m{/git/commits$})  { $r = { sha => $GH{commit} }; }
     elsif($m eq "PATCH" && $u =~ m{/git/refs/})    { $r = { ref => "refs/heads/main" }; }
-    else { $p->{code} = 404; return (undef, main::gh_json({ message => "Not Found" })); }
+    else { return (404, main::gh_json({ message => "Not Found" })); }
 
-    $p->{code} = 200;
-    return (undef, main::gh_json($r));
+    return (200, main::gh_json($r));
 }
 
 {
