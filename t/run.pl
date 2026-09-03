@@ -58,7 +58,14 @@ sub is {
 }
 sub like {
     my ($n, $ist, $re) = @_;
-    return ok($n, defined($ist) && $ist =~ $re,
+    # Das "? 1 : 0" ist Pflicht, nicht Zierde: die Argumentliste eines
+    # Sub-Aufrufs ist LISTENkontext, und ein fehlgeschlagener Match liefert
+    # dort die leere Liste statt "". Die faellt beim Flatten weg, der
+    # Info-Text rutscht auf den Platz des Wahrheitswerts - und ist immer
+    # wahr. Jede like()-Zusicherung war damit wirkungslos und meldete "ok",
+    # auch wenn der Match danebenlag.
+    my $wahr = (defined($ist) && $ist =~ $re) ? 1 : 0;
+    return ok($n, $wahr,
               "'" . (defined($ist) ? substr($ist,0,120) : "undef") . "' passt nicht auf $re");
 }
 sub schreib {
@@ -409,17 +416,53 @@ sub konfig {
     like("Start: zweiter Lauf wird abgelehnt", $err, qr/laeuft schon/);
     delete $hash->{helper}{RUNNING_PID};
 
+    # Ein geglueckter Start hinterlaesst RUNNING_PID (die Attrappe liefert
+    # wie BlockingCall eine PID zurueck) - das Geraet gilt danach als
+    # beschaeftigt, genau wie im Betrieb. Vor jedem weiteren Fall also
+    # aufraeumen, sonst prueft man nur noch "laeuft schon".
+    delete $hash->{helper}{RUNNING_PID};
     $attr{gh}{saveBeforeExport} = 0;
     @CMD = ();
     GithubExport_Start($hash, 0);
     is("saveBeforeExport 0 spart das save", scalar(@CMD), 0);
 
+    delete $hash->{helper}{RUNNING_PID};
     $attr{gh}{disable} = 1;
     like("disable blockt", GithubExport_Start($hash, 0), qr/abgeschaltet/);
     $attr{gh}{disable} = 0;
 
+    delete $hash->{helper}{RUNNING_PID};
     $err = GithubExport_Start($hash, 0, "quatsch");
     like("Start reicht Teile-Fehler durch", $err, qr/Unbekannter Teil/);
+}
+
+# ================================================================== Klappmenue
+# fhem.pl baut die Auswahlliste fuer FHEMWEB aus der Antwort auf "set <dev> ?":
+# getAllSets() macht  $a =~ s/.*one of //  und nimmt, was uebrig bleibt. Eine
+# Antwort ohne "one of" laesst den ganzen Satz stehen, und FHEMWEB zerlegt ihn
+# an Leerzeichen - im Menue standen dann "Unbekannter", "waehle", "aus".
+# Der Test macht genau diesen Schnitt nach.
+{
+    aufbau();
+    my $sl = GithubExport_Set($hash, "gh", "?");
+    like("set ?: Form", $sl, qr/^Unknown argument .*, choose one of \S/);
+    $sl =~ s/.*one of //;
+    is("set ?: das steht im Klappmenue",
+       join(" ", map { (split(/:/, $_))[0] } split(/\s+/, $sl)),
+       "export token deleteToken dryRun stop");
+
+    my $gl = GithubExport_Get($hash, "gh", "?");
+    like("get ?: Form", $gl, qr/^Unknown argument .*, choose one of \S/);
+    $gl =~ s/.*one of //;
+    is("get ?: das steht im Klappmenue",
+       join(" ", map { (split(/:/, $_))[0] } split(/\s+/, $gl)),
+       "parts token version");
+
+    # Ein unbekannter Befehl muss dieselbe Form haben, sonst steht der
+    # Fehlertext als Auswahl im Menue.
+    like("set <quatsch>: gleiche Form",
+         GithubExport_Set($hash, "gh", "quatsch"),
+         qr/^Unknown argument quatsch, choose one of \S/);
 }
 
 # ------------------------------------------------------------------ Ergebnis
