@@ -19,6 +19,40 @@
 #
 ##############################################################################
 #
+# 1.0.2 - 2026-09-03  Online-Hilfe fuer Set-, Get- und Attributnamen.
+#                     FHEMWEB blendet unter dem Klappmenue die passende
+#                     Erklaerung ein, sobald man etwas auswaehlt - es holt sich
+#                     dafuer per "help <Modul>" die commandref und sucht darin
+#                     den Anker <a id="<TYPE>-<set|get|attr>-<name>">; gezeigt
+#                     wird das umgebende <li>. Ohne Anker bleibt die Hilfe
+#                     einfach leer, ohne Fehlermeldung.
+#                     Die commandref hat jetzt 37 solche Anker, je einen fuer
+#                     jeden Set-Befehl, Get-Befehl und jedes Attribut; wo
+#                     mehrere Attribute in einem Absatz stehen (logLines,
+#                     logErrorLines, logFreezeLines), traegt der Absatz
+#                     mehrere Anker und alle drei zeigen darauf.
+#                     Der Kopfanker ist von <a name=...> auf <a id=...>
+#                     umgestellt: fhemweb.js liest ihn als "mtype" und baut
+#                     daraus die gesuchte id. Stimmt er nicht, findet es
+#                     keinen einzigen Eintrag mehr.
+#                     t/cref.py prueft beides mit - jeden Anker einzeln und
+#                     dass der erste Anker das Modul selbst ist.
+#
+# 1.0.1 - 2026-09-03  Das Klappmenue im FHEMWEB zeigte Wortsalat statt der
+#                     Set-Befehle: "Befehl,", "Unbekannter", "aus", "waehle",
+#                     "eins" - dazwischen die echten Eintraege.
+#                     Ursache ist keine Eigenheit von FHEMWEB, sondern eine
+#                     feste Vereinbarung in fhem.pl: getAllSets() schneidet die
+#                     Antwort auf "set <dev> ?" mit  s/.*one of //  zurecht.
+#                     Meine deutsche Meldung "Unbekannter Befehl, waehle eins
+#                     aus: ..." enthaelt kein "one of", also blieb der ganze
+#                     Satz stehen und wurde an Leerzeichen zerlegt.
+#                     Set und Get antworten jetzt in der vorgeschriebenen Form
+#                     "Unknown argument <cmd>, choose one of <liste>". Ein Test
+#                     nimmt die Antwort so auseinander, wie fhem.pl es tut, und
+#                     vergleicht das Ergebnis mit der Liste - eine deutsche
+#                     Fassung faellt damit sofort auf.
+#
 # 1.0.0 - 2026-09-03  Erste Fassung. Uebernimmt die Aufgabe von
 #                     fhem-backup.sh, aber von innen: Dateien einsammeln,
 #                     Log-Auszuege bauen und entschaerfen, alles in EINEM
@@ -63,7 +97,7 @@ my $GE_ERRPAT = '(error|fehler|warn|timeout|disconnect|reappear|reset|cannot|'
 
 # ---------------------------------------------------------------- Version
 {
-    my $FALLBACK = "1.0.0";
+    my $FALLBACK = "1.0.2";
     my $cached;
     sub GithubExport_Version {
         return $cached if(defined($cached));
@@ -237,7 +271,12 @@ sub GithubExport_Set {
     my ($hash, $name, $cmd, @args) = @_;
     my $list = "export token:textField deleteToken:noArg dryRun stop:noArg";
 
-    return "Unbekannter Befehl, waehle eins aus: $list"
+    # Die Formulierung ist NICHT frei waehlbar. fhem.pl baut die Liste fuer
+    # FHEMWEB mit  $a =~ s/.*one of //  aus der Antwort auf "set <dev> ?".
+    # Fehlt das "one of", bleibt der ganze Satz stehen und wird an Leerzeichen
+    # zerlegt - im Klappmenue standen dann "Unbekannter", "waehle", "aus".
+    return "Unknown argument " . (defined($cmd) ? $cmd : "")
+         . ", choose one of $list"
         if(!defined($cmd) || $cmd eq "?");
 
     if($cmd eq "token") {
@@ -272,7 +311,7 @@ sub GithubExport_Set {
         return undef;
     }
 
-    return "Unbekannter Befehl $cmd, waehle eins aus: $list";
+    return "Unknown argument $cmd, choose one of $list";
 }
 
 # ---------------------------------------------------------------- Get
@@ -280,7 +319,9 @@ sub GithubExport_Get {
     my ($hash, $name, $cmd, @args) = @_;
     my $list = "parts:noArg token:noArg version:noArg";
 
-    return "Unbekannter Befehl, waehle eins aus: $list" if(!defined($cmd));
+    return "Unknown argument " . (defined($cmd) ? $cmd : "")
+         . ", choose one of $list"
+        if(!defined($cmd) || $cmd eq "?");
 
     if($cmd eq "parts") {
         my $fl = AttrVal($name, "fileLogs", "");
@@ -312,7 +353,7 @@ sub GithubExport_Get {
         return "98_GithubExport.pm v" . GithubExport_Version();
     }
 
-    return "Unbekannter Befehl $cmd, waehle eins aus: $list";
+    return "Unknown argument $cmd, choose one of $list";
 }
 
 # ---------------------------------------------------------------- Teile lesen
@@ -1033,7 +1074,7 @@ sub GithubExport_Aborted {
 =item summary_DE Sichert fhem.cfg, fhem.save, Module und Log-Auszuege per Token nach GitHub
 =begin html
 
-<a name="GithubExport"></a>
+<a id="GithubExport"></a>
 <h3>GithubExport</h3>
 <ul>
   Sichert die FHEM-Konfiguration in ein GitHub-Repository &ndash; aus FHEM
@@ -1055,7 +1096,7 @@ sub GithubExport_Aborted {
   auch kein Commit.
   <br><br>
 
-  <a name="GithubExportdefine"></a>
+  <a id="GithubExport-define"></a>
   <b>Define</b>
   <ul>
     <code>define &lt;name&gt; GithubExport &lt;owner&gt;/&lt;repo&gt; [&lt;zielordner&gt;]</code>
@@ -1078,10 +1119,10 @@ sub GithubExport_Aborted {
   </ul>
   <br>
 
-  <a name="GithubExportset"></a>
+  <a id="GithubExport-set"></a>
   <b>Set</b>
   <ul>
-    <li><b>export [&lt;teile&gt;]</b> &ndash; sichert und pusht. Ohne Angabe
+    <li><a id="GithubExport-set-export"></a><b>export [&lt;teile&gt;]</b> &ndash; sichert und pusht. Ohne Angabe
         gilt das Attribut <code>exportParts</code>. Moegliche Teile:
         <ul>
           <li><code>cfg</code> &ndash; <code>fhem.cfg</code></li>
@@ -1104,100 +1145,100 @@ sub GithubExport_Aborted {
         Ein vorangestelltes <code>-</code> waehlt ab:
         <code>set myExport export all -state</code>
         </li>
-    <li><b>dryRun [&lt;teile&gt;]</b> &ndash; sammelt alles ein und fragt das
+    <li><a id="GithubExport-set-dryRun"></a><b>dryRun [&lt;teile&gt;]</b> &ndash; sammelt alles ein und fragt das
         Repository ab, uebertraegt aber nichts. Damit laesst sich pruefen, ob
         Token, Rechte und Branch stimmen und was ein echter Export
         uebertragen wuerde (Reading <code>preview</code>, <code>*</code> =
         wuerde uebertragen).</li>
-    <li><b>token &lt;wert&gt;</b> &ndash; Token hinterlegen (setKeyValue).</li>
-    <li><b>deleteToken</b> &ndash; Token wieder loeschen.</li>
-    <li><b>stop</b> &ndash; einen laufenden Export abbrechen.</li>
+    <li><a id="GithubExport-set-token"></a><b>token &lt;wert&gt;</b> &ndash; Token hinterlegen (setKeyValue).</li>
+    <li><a id="GithubExport-set-deleteToken"></a><b>deleteToken</b> &ndash; Token wieder loeschen.</li>
+    <li><a id="GithubExport-set-stop"></a><b>stop</b> &ndash; einen laufenden Export abbrechen.</li>
   </ul>
   <br>
 
-  <a name="GithubExportget"></a>
+  <a id="GithubExport-get"></a>
   <b>Get</b>
   <ul>
-    <li><b>parts</b> &ndash; erklaert die Teile und zeigt, was gerade
+    <li><a id="GithubExport-get-parts"></a><b>parts</b> &ndash; erklaert die Teile und zeigt, was gerade
         eingestellt ist.</li>
-    <li><b>token</b> &ndash; sagt, ob ein Token hinterlegt ist (ohne ihn
+    <li><a id="GithubExport-get-token"></a><b>token</b> &ndash; sagt, ob ein Token hinterlegt ist (ohne ihn
         auszugeben).</li>
-    <li><b>version</b> &ndash; Version des Moduls.</li>
+    <li><a id="GithubExport-get-version"></a><b>version</b> &ndash; Version des Moduls.</li>
   </ul>
   <br>
 
-  <a name="GithubExportattr"></a>
+  <a id="GithubExport-attr"></a>
   <b>Attribute</b>
   <ul>
-    <li><b>branch</b> &ndash; Ziel-Branch (Default <code>main</code>).</li>
-    <li><b>targetFolder</b> &ndash; Ordner im Repository; ueberschreibt die
+    <li><a id="GithubExport-attr-branch"></a><b>branch</b> &ndash; Ziel-Branch (Default <code>main</code>).</li>
+    <li><a id="GithubExport-attr-targetFolder"></a><b>targetFolder</b> &ndash; Ordner im Repository; ueberschreibt die
         Angabe aus dem <code>define</code>.</li>
-    <li><b>fhemDir</b> &ndash; FHEM-Verzeichnis (Default
+    <li><a id="GithubExport-attr-fhemDir"></a><b>fhemDir</b> &ndash; FHEM-Verzeichnis (Default
         <code>attr global modpath</code>).</li>
-    <li><b>exportParts</b> &ndash; was <code>set export</code> ohne Angabe
+    <li><a id="GithubExport-attr-exportParts"></a><b>exportParts</b> &ndash; was <code>set export</code> ohne Angabe
         sichert (Default <code>cfg state modules log freeze</code>).</li>
-    <li><b>interval</b> &ndash; Minuten fuer einen wiederkehrenden Export
+    <li><a id="GithubExport-attr-interval"></a><b>interval</b> &ndash; Minuten fuer einen wiederkehrenden Export
         (0 oder nicht gesetzt = aus). Reading <code>nextRun</code>.</li>
-    <li><b>saveBeforeExport</b> &ndash; vor dem Export ein FHEM-<code>save</code>
+    <li><a id="GithubExport-attr-saveBeforeExport"></a><b>saveBeforeExport</b> &ndash; vor dem Export ein FHEM-<code>save</code>
         ausfuehren (Default 1). Mit <code>attr global autosave 0</code>
         schreibt FHEM von sich aus weder <code>fhem.cfg</code> noch
         <code>fhem.save</code> &ndash; ohne <code>save</code> sichert man also
         den Stand vom letzten Mal.</li>
-    <li><b>modulePattern</b> &ndash; Suchmuster fuer eigene Module, mehrere
+    <li><a id="GithubExport-attr-modulePattern"></a><b>modulePattern</b> &ndash; Suchmuster fuer eigene Module, mehrere
         durch Leerzeichen (Default <code>99_*.pm</code>).</li>
-    <li><b>extraFiles</b> &ndash; weitere Dateien, eine je Zeile, relativ zum
+    <li><a id="GithubExport-attr-extraFiles"></a><b>extraFiles</b> &ndash; weitere Dateien, eine je Zeile, relativ zum
         FHEM-Verzeichnis oder absolut. Wildcards erlaubt, ein Ziel im
         Repository laesst sich mit <code>=&gt;</code> angeben:
         <br><code>FHEM/98_Meins.pm</code>
         <br><code>/etc/systemd/system/fhem.service =&gt; system/fhem.service</code></li>
-    <li><b>logLines</b> (600), <b>logErrorLines</b> (300),
+    <li><a id="GithubExport-attr-logFreezeLines"></a><a id="GithubExport-attr-logErrorLines"></a><a id="GithubExport-attr-logLines"></a><b>logLines</b> (600), <b>logErrorLines</b> (300),
         <b>logFreezeLines</b> (400) &ndash; Umfang der Log-Auszuege.
         Bewusst klein: diese Dateien aendern sich bei jedem Lauf, jede
         Fassung bleibt als eigener Blob im Repository liegen.</li>
-    <li><b>logMaxBytes</b> (120000) &ndash; harte Obergrenze je Auszug.</li>
-    <li><b>logMaxCols</b> (300), <b>logFreezeMaxCols</b> (600) &ndash; Laenge
+    <li><a id="GithubExport-attr-logMaxBytes"></a><b>logMaxBytes</b> (120000) &ndash; harte Obergrenze je Auszug.</li>
+    <li><a id="GithubExport-attr-logFreezeMaxCols"></a><a id="GithubExport-attr-logMaxCols"></a><b>logMaxCols</b> (300), <b>logFreezeMaxCols</b> (600) &ndash; Laenge
         je Zeile. Eine Freezemon-Meldung listet jeden laufenden Timer auf und
         wird bis zu 20 kB lang; ungekuerzt fressen ein paar solche Zeilen den
         ganzen Auszug.</li>
-    <li><b>logErrorPattern</b> &ndash; Suchmuster fuer
+    <li><a id="GithubExport-attr-logErrorPattern"></a><b>logErrorPattern</b> &ndash; Suchmuster fuer
         <code>fhem-fehler.log</code> (Perl-Regex, ohne Beachtung der
         Gross-/Kleinschreibung).</li>
-    <li><b>fileLogs</b> &ndash; Geraetenamen fuer <code>filelog</code> ohne
+    <li><a id="GithubExport-attr-fileLogs"></a><b>fileLogs</b> &ndash; Geraetenamen fuer <code>filelog</code> ohne
         Argument, durch Leerzeichen getrennt (passend zum Dateinamen ohne
         Jahresteil: <code>bewaesserung-2026.log</code> &rarr;
         <code>bewaesserung</code>).</li>
-    <li><b>fileLogLines</b> (6000), <b>fileLogMaxBytes</b> (400000) &ndash;
+    <li><a id="GithubExport-attr-fileLogMaxBytes"></a><a id="GithubExport-attr-fileLogLines"></a><b>fileLogLines</b> (6000), <b>fileLogMaxBytes</b> (400000) &ndash;
         Umfang der FileLog-Auszuege.</li>
-    <li><b>fileLogNoise</b> &ndash; Zeilen, die vorher rausfliegen (Default
+    <li><a id="GithubExport-attr-fileLogNoise"></a><b>fileLogNoise</b> &ndash; Zeilen, die vorher rausfliegen (Default
         <code>(remainingTime|pauseTimeRemaining): </code>). Countdown-Ticks
         machen in manchen Geraete-Logs 85 % der Zeilen aus und sagen nichts;
         ohne sie reicht derselbe Auszug viel weiter zurueck.</li>
-    <li><b>sanitize</b> &ndash; Token, Passwoerter und Zugangsdaten in URLs in
+    <li><a id="GithubExport-attr-sanitize"></a><b>sanitize</b> &ndash; Token, Passwoerter und Zugangsdaten in URLs in
         den Log-Auszuegen ersetzen (Default 1). Betrifft <b>nur</b> die
         Log-Auszuege &ndash; <code>fhem.cfg</code> und <code>fhem.save</code>
         gehen unveraendert ins Repository.</li>
-    <li><b>allowPublicRepo</b> &ndash; in ein oeffentliches Repository pushen
+    <li><a id="GithubExport-attr-allowPublicRepo"></a><b>allowPublicRepo</b> &ndash; in ein oeffentliches Repository pushen
         (Default 0, also nein). <code>fhem.cfg</code> und
         <code>fhem.save</code> enthalten Zugangsdaten im Klartext; das Modul
         fragt die Sichtbarkeit vor jedem Push ab und verweigert sonst.</li>
-    <li><b>maxFileSize</b> &ndash; Dateien darueber werden uebersprungen
+    <li><a id="GithubExport-attr-maxFileSize"></a><b>maxFileSize</b> &ndash; Dateien darueber werden uebersprungen
         (Default 5000000 Bytes), mit Hinweis in <code>lastWarning</code>.</li>
-    <li><b>commitMessage</b> &ndash; Default <code>Update %f - %t</code>.
+    <li><a id="GithubExport-attr-commitMessage"></a><b>commitMessage</b> &ndash; Default <code>Update %f - %t</code>.
         Platzhalter: <code>%f</code> Ordner, <code>%t</code> Zeitpunkt,
         <code>%n</code> Geraetename, <code>%c</code> Anzahl Dateien,
         <code>%b</code> Branch.</li>
-    <li><b>authorName</b>, <b>authorEmail</b> &ndash; Autor des Commits. Ohne
+    <li><a id="GithubExport-attr-authorEmail"></a><a id="GithubExport-attr-authorName"></a><b>authorName</b>, <b>authorEmail</b> &ndash; Autor des Commits. Ohne
         Angabe nimmt GitHub den Besitzer des Tokens.</li>
-    <li><b>apiUrl</b> &ndash; Default <code>https://api.github.com</code>
+    <li><a id="GithubExport-attr-apiUrl"></a><b>apiUrl</b> &ndash; Default <code>https://api.github.com</code>
         (fuer GitHub Enterprise anpassen).</li>
-    <li><b>httpTimeout</b> (60) &ndash; Sekunden je API-Aufruf.</li>
-    <li><b>timeout</b> (300) &ndash; Sekunden, nach denen der ganze Lauf
+    <li><a id="GithubExport-attr-httpTimeout"></a><b>httpTimeout</b> (60) &ndash; Sekunden je API-Aufruf.</li>
+    <li><a id="GithubExport-attr-timeout"></a><b>timeout</b> (300) &ndash; Sekunden, nach denen der ganze Lauf
         abgebrochen wird.</li>
-    <li><b>disable</b> &ndash; 1 schaltet Export und Zeitplan ab.</li>
+    <li><a id="GithubExport-attr-disable"></a><b>disable</b> &ndash; 1 schaltet Export und Zeitplan ab.</li>
   </ul>
   <br>
 
-  <a name="GithubExportreadings"></a>
+  <a id="GithubExport-readings"></a>
   <b>Readings</b>
   <ul>
     <li><b>state</b> &ndash; <code>Export laeuft</code> /
