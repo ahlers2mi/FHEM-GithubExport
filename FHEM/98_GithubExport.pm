@@ -19,6 +19,21 @@
 #
 ##############################################################################
 #
+# 1.0.1 - 2026-09-03  Das Klappmenue im FHEMWEB zeigte Wortsalat statt der
+#                     Set-Befehle: "Befehl,", "Unbekannter", "aus", "waehle",
+#                     "eins" - dazwischen die echten Eintraege.
+#                     Ursache ist keine Eigenheit von FHEMWEB, sondern eine
+#                     feste Vereinbarung in fhem.pl: getAllSets() schneidet die
+#                     Antwort auf "set <dev> ?" mit  s/.*one of //  zurecht.
+#                     Meine deutsche Meldung "Unbekannter Befehl, waehle eins
+#                     aus: ..." enthaelt kein "one of", also blieb der ganze
+#                     Satz stehen und wurde an Leerzeichen zerlegt.
+#                     Set und Get antworten jetzt in der vorgeschriebenen Form
+#                     "Unknown argument <cmd>, choose one of <liste>". Ein Test
+#                     nimmt die Antwort so auseinander, wie fhem.pl es tut, und
+#                     vergleicht das Ergebnis mit der Liste - eine deutsche
+#                     Fassung faellt damit sofort auf.
+#
 # 1.0.0 - 2026-09-03  Erste Fassung. Uebernimmt die Aufgabe von
 #                     fhem-backup.sh, aber von innen: Dateien einsammeln,
 #                     Log-Auszuege bauen und entschaerfen, alles in EINEM
@@ -63,7 +78,7 @@ my $GE_ERRPAT = '(error|fehler|warn|timeout|disconnect|reappear|reset|cannot|'
 
 # ---------------------------------------------------------------- Version
 {
-    my $FALLBACK = "1.0.0";
+    my $FALLBACK = "1.0.1";
     my $cached;
     sub GithubExport_Version {
         return $cached if(defined($cached));
@@ -237,7 +252,12 @@ sub GithubExport_Set {
     my ($hash, $name, $cmd, @args) = @_;
     my $list = "export token:textField deleteToken:noArg dryRun stop:noArg";
 
-    return "Unbekannter Befehl, waehle eins aus: $list"
+    # Die Formulierung ist NICHT frei waehlbar. fhem.pl baut die Liste fuer
+    # FHEMWEB mit  $a =~ s/.*one of //  aus der Antwort auf "set <dev> ?".
+    # Fehlt das "one of", bleibt der ganze Satz stehen und wird an Leerzeichen
+    # zerlegt - im Klappmenue standen dann "Unbekannter", "waehle", "aus".
+    return "Unknown argument " . (defined($cmd) ? $cmd : "")
+         . ", choose one of $list"
         if(!defined($cmd) || $cmd eq "?");
 
     if($cmd eq "token") {
@@ -272,7 +292,7 @@ sub GithubExport_Set {
         return undef;
     }
 
-    return "Unbekannter Befehl $cmd, waehle eins aus: $list";
+    return "Unknown argument $cmd, choose one of $list";
 }
 
 # ---------------------------------------------------------------- Get
@@ -280,7 +300,9 @@ sub GithubExport_Get {
     my ($hash, $name, $cmd, @args) = @_;
     my $list = "parts:noArg token:noArg version:noArg";
 
-    return "Unbekannter Befehl, waehle eins aus: $list" if(!defined($cmd));
+    return "Unknown argument " . (defined($cmd) ? $cmd : "")
+         . ", choose one of $list"
+        if(!defined($cmd) || $cmd eq "?");
 
     if($cmd eq "parts") {
         my $fl = AttrVal($name, "fileLogs", "");
@@ -312,7 +334,7 @@ sub GithubExport_Get {
         return "98_GithubExport.pm v" . GithubExport_Version();
     }
 
-    return "Unbekannter Befehl $cmd, waehle eins aus: $list";
+    return "Unknown argument $cmd, choose one of $list";
 }
 
 # ---------------------------------------------------------------- Teile lesen
