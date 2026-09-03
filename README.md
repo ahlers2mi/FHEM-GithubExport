@@ -41,6 +41,33 @@ Das ist der wesentliche Unterschied zum bisherigen `fhem-backup.sh`: dort musste
 ein Klon auf dem FHEM-Rechner liegen, gepullt und gepusht werden. Hier gibt es
 weder Klon noch Merge-Konflikt.
 
+## Warum ein eigener HTTP-Client
+
+Das Modul spricht nicht über FHEMs `HttpUtils` mit GitHub, sondern über einen
+eigenen kleinen Client. Der Grund ist gemessen, nicht theoretisch: `HttpUtils`
+schreibt im blockierenden Zweig den Rumpf mit **einem** `syswrite`, ohne
+Schleife und ohne den Rückgabewert anzusehen — und `IO::Socket::SSL` liefert
+auch auf einem **blockierenden** Socket nur ein TLS-Record (16384 Bytes) je
+Aufruf zurück. Nachgestellt mit einem lokalen TLS-Server und der Größe einer
+echten `fhem.cfg`:
+
+```
+gewollt 1823437, syswrite lieferte 16384, empfangen 16384
+```
+
+GitHub bekam also 16 kB von 1,8 MB angekündigten, wartete auf den Rest und
+antwortete nach 25 Sekunden mit `400 We received a malformed request from your
+client`. Die GET-Aufrufe liefen die ganze Zeit — sie haben keinen Rumpf; genau
+deshalb sah es zuerst nach einem Problem der Blob-Schnittstelle aus.
+
+`GithubExport_Request` schreibt in einer Schleife, bis alles draußen ist (6,4 MB
+gehen in rund 390 Runden raus). Zwei Folgen: `attr global proxy` wirkt hier
+**nicht**, und das Zertifikat der Gegenstelle wird immer geprüft.
+
+`t/run.pl` schickt dafür 1,8 MB durch einen echten TLS-Server und zählt nach,
+was ankommt. Mit einem einzelnen `syswrite` statt der Schleife meldet der Test
+`16276 von 1823437`.
+
 ## Token
 
 ```
