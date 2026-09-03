@@ -1,0 +1,33 @@
+name: Update controls_GithubExport.txt
+
+on:
+  push:
+    paths:
+      - 'FHEM/98_GithubExport.pm'
+  workflow_dispatch:
+
+jobs:
+  update-controls:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update controls_GithubExport.txt
+        run: |
+          : > controls_GithubExport.txt
+          for f in FHEM/98_GithubExport.pm; do
+            [ -f "$f" ] || continue
+            SIZE=$(wc -c < "$f")
+            DATE=$(date -u +"%Y-%m-%d_%H:%M:%S")
+            echo "UPD ${DATE} ${SIZE} ${f}" >> controls_GithubExport.txt
+          done
+
+      - name: Commit updated controls_GithubExport.txt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add controls_GithubExport.txt
+          git diff --cached --quiet || git commit -m "Auto-update controls_GithubExport.txt"
+          git push
