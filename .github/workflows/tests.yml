@@ -1,0 +1,18 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntaxpruefung
+        run: perl -c FHEM/98_GithubExport.pm
+      - name: Szenario-Tests
+        run: perl t/run.pl
+      - name: commandref gegen den Code
+        run: python3 t/cref.py

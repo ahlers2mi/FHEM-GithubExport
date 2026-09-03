@@ -1,0 +1,43 @@
+name: Update controls_GithubExport.txt
+
+on:
+  push:
+    paths:
+      - 'FHEM/98_GithubExport.pm'
+  workflow_dispatch:
+
+jobs:
+  update-controls:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fuer "git log -- <datei>" - mit der Standardtiefe 1 gibt es keine
+          # Historie, aus der sich das Datum der Datei ablesen liesse.
+          fetch-depth: 0
+
+      - name: Update controls_GithubExport.txt
+        run: |
+          : > controls_GithubExport.txt
+          for f in FHEM/98_GithubExport.pm; do
+            [ -f "$f" ] || continue
+            SIZE=$(wc -c < "$f")
+            # Datum der letzten AENDERUNG der Datei, nicht "jetzt". Sonst
+            # schreibt der Workflow bei jedem Push eine neue Zeile, committet
+            # sie, und dieser Bot-Commit loest wiederum Pruefungen aus, die
+            # auf Freigabe warten. Ausserdem ist das Datum der Aenderung das,
+            # was FHEMs "update" eigentlich wissen will.
+            DATE=$(TZ=UTC git log -1 --format=%cd --date=format:'%Y-%m-%d_%H:%M:%S' -- "$f")
+            [ -n "$DATE" ] || DATE=$(date -u +"%Y-%m-%d_%H:%M:%S")
+            echo "UPD ${DATE} ${SIZE} ${f}" >> controls_GithubExport.txt
+          done
+
+      - name: Commit updated controls_GithubExport.txt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add controls_GithubExport.txt
+          git diff --cached --quiet || git commit -m "Auto-update controls_GithubExport.txt"
+          git push
