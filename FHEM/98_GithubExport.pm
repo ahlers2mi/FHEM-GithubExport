@@ -19,6 +19,30 @@
 #
 ##############################################################################
 #
+# 1.0.4 - 2026-09-04  Eine eingestellte, aber nicht ausgewaehlte Quelle wird
+#                     jetzt gemeldet.
+#                     Anlass: "attr myExport fileLogs bewaesserung" war gesetzt,
+#                     ein "attr exportParts" gab es nicht - also galt der
+#                     Default "cfg state modules log freeze", und "filelog"
+#                     steht da nicht drin. Das Modul hat das Attribut
+#                     stillschweigend ignoriert. Im Repository blieb der
+#                     FileLog-Auszug vom letzten Lauf des alten Skripts liegen,
+#                     zwei Tage alt - und weil er im selben Commit steht wie die
+#                     frisch geschriebenen Dateien, sieht er aktuell aus. Der
+#                     Verdacht fiel prompt auf eine falsche Leserichtung ("nimmt
+#                     die ersten 6000 Zeilen statt der letzten"). Nachgemessen
+#                     an einer Datei mit 100000 Zeilen: die Reihenfolge stimmt,
+#                     der Auszug endet mit der neuesten Zeile.
+#                     lastWarning nennt jetzt beide Faelle - fileLogs ohne
+#                     'filelog' und extraFiles ohne 'extra'.
+#                     Dazu die Tests, die das haetten finden muessen: der
+#                     FileLog-Testfall hatte VIER Zeilen und lag damit weit
+#                     unter dem Deckel von 6000 - eine vertauschte Leserichtung
+#                     konnte er gar nicht bemerken. Jetzt laufen Tail und
+#                     FileLog gegen Dateien, die groesser sind als ihr Deckel,
+#                     und pruefen, dass die JUENGSTE Zeile drin ist und die
+#                     aelteste nicht.
+#
 # 1.0.3 - 2026-09-03  Der erste echte Export scheiterte an einem 400 von
 #                     GitHub: "We received a malformed request from your
 #                     client", ausgerechnet beim POST auf /git/blobs, waehrend
@@ -126,7 +150,7 @@ my $GE_ERRPAT = '(error|fehler|warn|timeout|disconnect|reappear|reset|cannot|'
 
 # ---------------------------------------------------------------- Version
 {
-    my $FALLBACK = "1.0.3";
+    my $FALLBACK = "1.0.4";
     my $cached;
     sub GithubExport_Version {
         return $cached if(defined($cached));
@@ -469,6 +493,7 @@ sub GithubExport_BuildConfig {
         logPattern  => GithubExport_Path($fhemDir, AttrVal("global", "logfile",   "./log/fhem-%Y-%m.log")),
 
         modulePattern    => AttrVal($name, "modulePattern", "99_*.pm"),
+        fileLogsAttr     => AttrVal($name, "fileLogs", ""),
         extraFiles       => AttrVal($name, "extraFiles", ""),
 
         logLines         => int(AttrVal($name, "logLines",         600)),
@@ -604,6 +629,18 @@ sub GithubExport_Collect {
         return if(!defined($data) || $data eq "");
         push @files, { path => $ziel, data => GithubExport_Bytes($data) };
     };
+
+    # Eingestellt, aber nicht ausgewaehlt: das faellt sonst nirgends auf. Der
+    # Lauf meldet "ok", die alte Datei bleibt im Repository liegen und sieht im
+    # selben Commit wie die frischen aus - am 04.09. war ein FileLog-Auszug so
+    # zwei Tage alt, ohne dass irgendetwas darauf hingewiesen haette.
+    push @warn, "attr fileLogs ist gesetzt ($cfg->{fileLogsAttr}), aber 'filelog' "
+              . "steht nicht in der Auswahl - die Geraete-Logs werden NICHT gesichert"
+        if(!$p->{filelog} && defined($cfg->{fileLogsAttr}) && $cfg->{fileLogsAttr} =~ /\S/);
+
+    push @warn, "attr extraFiles ist gesetzt, aber 'extra' steht nicht in der "
+              . "Auswahl - diese Dateien werden NICHT gesichert"
+        if(!$p->{extra} && defined($cfg->{extraFiles}) && $cfg->{extraFiles} =~ /\S/);
 
     $nimm->($cfg->{cfgFile},   $pre . "fhem.cfg")   if($p->{cfg});
     $nimm->($cfg->{stateFile}, $pre . "fhem.save")  if($p->{state});
@@ -1336,7 +1373,15 @@ sub GithubExport_Aborted {
     <li><a id="GithubExport-attr-logFreezeLines"></a><a id="GithubExport-attr-logErrorLines"></a><a id="GithubExport-attr-logLines"></a><b>logLines</b> (600), <b>logErrorLines</b> (300),
         <b>logFreezeLines</b> (400) &ndash; Umfang der Log-Auszuege.
         Bewusst klein: diese Dateien aendern sich bei jedem Lauf, jede
-        Fassung bleibt als eigener Blob im Repository liegen.</li>
+        Fassung bleibt als eigener Blob im Repository liegen.
+        <br>
+        <b>Zeilen sind ein schlechtes Mass fuer Zeit:</b> wie weit 600 Zeilen
+        zurueckreichen, haengt davon ab, wie viel gerade los war &ndash;
+        gemessen zwischen zwei und fuenf Stunden. Wer eine ganze Nacht
+        nachlesen will, braucht eher 3000. Dabei <b>muss</b>
+        <code>logMaxBytes</code> mitwachsen: der Byte-Deckel greift zuletzt und
+        schneidet sonst wieder auf die alte Laenge zurueck, ohne dass es
+        auffaellt.</li>
     <li><a id="GithubExport-attr-logMaxBytes"></a><b>logMaxBytes</b> (120000) &ndash; harte Obergrenze je Auszug.</li>
     <li><a id="GithubExport-attr-logFreezeMaxCols"></a><a id="GithubExport-attr-logMaxCols"></a><b>logMaxCols</b> (300), <b>logFreezeMaxCols</b> (600) &ndash; Laenge
         je Zeile. Eine Freezemon-Meldung listet jeden laufenden Timer auf und
@@ -1407,10 +1452,15 @@ sub GithubExport_Aborted {
         <b>lastChangedFiles</b> &ndash; deren Namen,
         <b>lastBytes</b> &ndash; uebertragene Bytes</li>
     <li><b>lastParts</b> &ndash; womit der Lauf angestossen wurde</li>
-    <li><b>lastWarning</b> &ndash; fehlende, zu grosse oder unlesbare Dateien.
+    <li><b>lastWarning</b> &ndash; fehlende, zu grosse oder unlesbare Dateien;
+        ausserdem Quellen, die zwar <i>eingestellt</i>, aber nicht
+        <i>ausgewaehlt</i> sind (<code>fileLogs</code> ohne
+        <code>filelog</code>, <code>extraFiles</code> ohne <code>extra</code>).
         <b>Hier zuerst nachsehen</b>, wenn etwas nicht im Repository
-        auftaucht: ein Lauf ist auch dann "ok", wenn einzelne Quellen
-        gefehlt haben.</li>
+        auftaucht: ein Lauf ist auch dann "ok", wenn einzelne Quellen gefehlt
+        haben &ndash; und eine nicht geschriebene Datei bleibt in ihrer alten
+        Fassung liegen, im selben Commit wie die frischen. Sie sieht damit
+        aktuell aus, ohne es zu sein.</li>
     <li><b>lastError</b> &ndash; Fehlertext des letzten Laufs</li>
     <li><b>preview</b> &ndash; Ergebnis von <code>dryRun</code></li>
     <li><b>repoVisibility</b> &ndash; <code>privat</code> /

@@ -256,6 +256,53 @@ sub konfig {
     ok("fehlende Datei bricht nicht ab", scalar(@$files) > 0);
 }
 
+# Auszuege muessen das ENDE der Datei zeigen. Der alte FileLog-Testfall hatte
+# VIER Zeilen und lag damit weit unter dem Deckel von 6000 - eine vertauschte
+# Leserichtung konnte er gar nicht bemerken. Genau darauf fiel am 04.09. der
+# Verdacht, als ein zwei Tage alter Auszug im Repository lag.
+{
+    aufbau(attr => { logLines => 50, fileLogLines => 50 });
+    schreib("$root/log/fhem-2026-35.log",
+        map { sprintf("2026.09.03 %02d:%02d:%02d 3: laufzeile %d",
+                      ($_/3600)%24, ($_/60)%60, $_%60, $_) } (1..500));
+    schreib("$root/log/bewaesserung-2026.log",
+        map { sprintf("2026-09-03_%02d:%02d:%02d bewaesserung zeile: %d",
+                      ($_/3600)%24, ($_/60)%60, $_%60, $_) } (1..500));
+
+    my ($files) = GithubExport_Collect(konfig("log filelog"));
+    my %hat = map { $_->{path} => $_ } @$files;
+
+    my @t = split(/\n/, $hat{"Main/log/fhem-tail.log"}{data});
+    is("Tail: genau logLines Zeilen",   scalar(@t), 50);
+    like("Tail: juengste Zeile ist drin", $t[-1], qr/laufzeile 500$/);
+    like("Tail: Anfang ist abgeschnitten", $t[0],  qr/laufzeile 451$/);
+
+    my @b = split(/\n/, $hat{"Main/log/bewaesserung-auszug.log"}{data});
+    is("FileLog: genau fileLogLines Zeilen", scalar(@b), 50);
+    like("FileLog: juengste Zeile ist drin", $b[-1], qr/zeile: 500$/);
+    like("FileLog: Anfang ist abgeschnitten", $b[0], qr/zeile: 451$/);
+}
+
+# Eingestellt, aber nicht ausgewaehlt - das war die eigentliche Ursache:
+# attr fileLogs war gesetzt, exportParts enthielt kein "filelog", und das Modul
+# schwieg dazu.
+{
+    aufbau();                                   # fileLogs = bewaesserung
+    my (undef, $warn) = GithubExport_Collect(konfig("cfg log"));
+    like("Warnung: fileLogs ohne 'filelog'", join(" | ", @$warn),
+         qr/fileLogs ist gesetzt.*NICHT gesichert/);
+
+    (undef, $warn) = GithubExport_Collect(konfig("cfg log filelog"));
+    ok("keine Warnung, wenn filelog ausgewaehlt ist",
+       join(" | ", @$warn) !~ /fileLogs ist gesetzt/);
+}
+{
+    aufbau(attr => { extraFiles => "FHEM/99_myUtils.pm" });
+    my (undef, $warn) = GithubExport_Collect(konfig("cfg"));
+    like("Warnung: extraFiles ohne 'extra'", join(" | ", @$warn),
+         qr/extraFiles ist gesetzt/);
+}
+
 # maxFileSize
 {
     aufbau(attr => { maxFileSize => 10 });
